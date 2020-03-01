@@ -12,23 +12,27 @@ package main
 
 import (
 	"../mr"
+	"fmt"
+	"os"
+
+	//"fmt"
 	"strconv"
 	"strings"
 	"unicode"
 )
 import "plugin"
-import "os"
-import "fmt"
+//import "os"
+//import "fmt"
 import "log"
 
 func main() {
 	if len(os.Args) != 2 {
 		fmt.Fprintf(os.Stderr, "Usage: mrworker xxx.so\n")
-		//os.Exit(1)
+		os.Exit(1)
 	}
 
-	//mapf, reducef := loadPlugin(os.Args[1])
-	mapf, reducef := loadfake()
+	mapf, reducef := loadPlugin(os.Args[1])
+	//mapf, reducef := loadfake()
 
 	mr.Worker(mapf, reducef)
 }

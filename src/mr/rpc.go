@@ -6,20 +6,34 @@ package mr
 // remember to capitalize all names.
 //
 
-import "os"
+import (
+	"os"
+	"time"
+)
 import "strconv"
 
-//
-// example to show how to declare the arguments
-// and reply for an RPC.
-//
-
-type ExampleArgs struct {
-	X int
+type worker struct {
+	UUID   string
+	Status string
+	// tasks timeout
+	TaskTimeout time.Time
+	Task        *task
+}
+type task struct {
+	Action string
+	File   string
 }
 
-type ExampleReply struct {
-	Y int
+type Args struct {
+	Worker *worker
+}
+
+type Reply struct {
+	//Success bool
+	NReduce int
+	IsMapFinished bool
+	IsAllFinished bool
+	NextWorker *worker
 }
 
 // Add your RPC definitions here.
