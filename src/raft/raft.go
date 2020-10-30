@@ -17,14 +17,27 @@ package raft
 //   in the same server.
 //
 
-import "sync"
-import "sync/atomic"
-import "../labrpc"
+import (
+	"math/rand"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"../labrpc"
+)
 
 // import "bytes"
 // import "../labgob"
 
+const (
+	FOLLOWER  = "FOLLOWER"
+	LEADER    = "LEADER"
+	CANDIDATE = "CANDIDATE"
+)
 
+var (
+	LOG = true
+)
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -47,13 +60,20 @@ type ApplyMsg struct {
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
-	mu        sync.Mutex          // Lock to protect shared access to this peer's state
+	mu        sync.RWMutex        // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
 
-	// Your data here (2A, 2B, 2C).
+	// TODO:Your data here (2A, 2B, 2C).
+
+	currentIdentity string
+	currentLeaderId int
+
+	currentTerm int
+	votedFor    int
+
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
@@ -63,10 +83,8 @@ type Raft struct {
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 
-	var term int
-	var isleader bool
-	// Your code here (2A).
-	return term, isleader
+	rf.logState("term:%d, leader %t \n", rf.currentTerm, rf.currentIdentity == LEADER)
+	return rf.currentTerm, rf.currentIdentity == LEADER
 }
 
 //
@@ -85,6 +103,11 @@ func (rf *Raft) persist() {
 	// rf.persister.SaveRaftState(data)
 }
 
+func (rf *Raft) logState(format string, a ...interface{}) {
+	//fmt.Printf("[id:%d-%s] term:%d votedFor:%d leader:%d |",
+	//	rf.me, rf.currentIdentity, rf.currentTerm, rf.votedFor, rf.currentLeaderId)
+	//fmt.Printf(format+"\n", a...)
+}
 
 //
 // restore previously persisted state.
@@ -108,15 +131,138 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
+func (rf *Raft) tryTransitionToCandidate() {
+	if rf.currentIdentity == LEADER {
+		return
+	}
+	rf.currentLeaderId = -1
+	rf.currentIdentity = CANDIDATE
+	rf.currentTerm++
+	// generate a random expireAt, then try transition to Follower
+	go func() {
+		time.Sleep(time.Duration(randRange(400, 750)))
+		//when the term is timeout
+		//but it still is a candidate
+		//then try transition to candidate again
+		if rf.currentIdentity == CANDIDATE {
+			rf.logState("[tryTTC] election timeout")
+			rf.tryTransitionToCandidate()
+			rf.logState("[tryTTC] after TT Candidate")
+		}
+	}()
+	// waiting the vote result
+	if rf.StartRequestVote() {
+		// win
+		rf.logState("[tryTTC] win election")
+		rf.tryTransitionToLeader()
+		rf.logState("[tryTTC] after TT Leader")
+	}
 
+}
 
+func (rf *Raft) tryTransitionToFollower(leaderId int) {
+	if rf.currentIdentity == FOLLOWER {
+		return
+	}
+	rf.votedFor = -1
+	rf.currentIdentity = FOLLOWER
+	rf.currentLeaderId = leaderId
+}
+
+func (rf *Raft) tryTransitionToLeader() {
+	if rf.currentIdentity != CANDIDATE {
+		return
+	}
+	rf.currentIdentity = LEADER
+	rf.currentLeaderId = rf.me
+	go rf.StartAppendEntries()
+}
+
+func (rf *Raft) StartAppendEntries() {
+	//var wg = sync.WaitGroup{}
+	// TODO:for loop,sleep
+	for {
+		if rf.currentIdentity == LEADER {
+			rf.logState("[StartAppendEntries] start HB")
+			for i := range rf.peers {
+				go func(server int) {
+					//defer wg.Done()
+					var result = AppendEntriesReply{}
+					rf.sendAppendEntries(server, &AppendEntriesArgs{
+						Term:     rf.currentTerm,
+						LeaderId: rf.me,
+					}, &result)
+
+				}(i)
+			}
+		} else {
+			rf.logState("[StartAppendEntries] break")
+
+			break
+		}
+		time.Sleep(time.Duration(randRange(50, 100)))
+	}
+
+}
+
+// Start the vote, if win the vote,return true
+func (rf *Raft) StartRequestVote() bool {
+	var currentTerm = -1
+	// vote to it self
+	rf.votedFor = rf.me
+	var wg = sync.WaitGroup{}
+	var count = 0
+	var mu sync.Mutex
+	//send to each rf.peers
+	for i := range rf.peers {
+		wg.Add(1)
+		//TODO: Is this necessary?
+		go func(server int, count *int) {
+			defer wg.Done()
+			var result = RequestVoteReply{}
+			rf.sendRequestVote(server, &RequestVoteArgs{
+				Term:        rf.currentTerm,
+				CandidateId: rf.me,
+			}, &result)
+			if result.Term > rf.currentTerm {
+				currentTerm = result.Term
+			}
+			rf.logState("[StartRequestVote] voted result:%t,term:%d", result.VoteGranted, result.Term)
+
+			if result.VoteGranted {
+				mu.Lock()
+				*count++
+				mu.Unlock()
+			}
+		}(i, &count)
+	}
+	wg.Wait()
+	var maj = len(rf.peers)/2 + 1
+
+	rf.logState("[StartRequestVote] received Term:%d,count: %d", currentTerm, count)
+	// while rf's current term is expired
+	if currentTerm > rf.currentTerm {
+		rf.currentTerm = currentTerm
+		rf.logState("[StartRequestVote] TT Follower")
+		rf.tryTransitionToFollower(-1)
+		rf.logState("[StartRequestVote] after TT Follower")
+		return false
+	}
+	if count >= maj {
+		rf.logState("[StartRequestVote] win election")
+		return true
+	}
+	return false
+}
 
 //
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 //
 type RequestVoteArgs struct {
-	// Your data here (2A, 2B).
+	//TODO: Your data here (2B).
+	Term        int
+	CandidateId int
 }
 
 //
@@ -124,14 +270,39 @@ type RequestVoteArgs struct {
 // field names must start with capital letters!
 //
 type RequestVoteReply struct {
-	// Your data here (2A).
+	Term        int
+	VoteGranted bool
 }
 
 //
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (2A, 2B).
+	var voteGranted = false
+	if rf.currentTerm > args.Term {
+		voteGranted = false
+	}
+	//TODO: Your code here (2B).
+	if rf.votedFor == args.CandidateId || rf.votedFor == -1 {
+		voteGranted = true
+		rf.votedFor = args.CandidateId
+	}
+	rf.logState("[RequestVote] voteGranted: %t", voteGranted)
+
+	reply.Term = rf.currentTerm
+	reply.VoteGranted = voteGranted
+
+	// discover higher term
+	if rf.currentIdentity == CANDIDATE && args.Term > rf.currentTerm {
+		rf.tryTransitionToFollower(-1)
+		rf.logState("[RequestVote] after Candidate TTC Follower: %t", voteGranted)
+	}
+	// discover higher term
+	if rf.currentIdentity == LEADER && args.Term > rf.currentTerm {
+		rf.tryTransitionToFollower(-1)
+		rf.logState("[RequestVote] after Leader TTC Follower: %t", voteGranted)
+	}
+
 }
 
 //
@@ -168,6 +339,52 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
+type AppendEntriesArgs struct {
+	Term     int
+	LeaderId int
+}
+
+type AppendEntriesReply struct {
+	Term    int
+	Success bool
+}
+
+//handler
+func (rf *Raft) RequestAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	var success bool
+
+	if rf.currentTerm > args.Term {
+		//invalid
+		success = false
+		rf.logState("[RequestAppendEntries] false")
+
+	} else {
+		// discover new term
+		if rf.currentIdentity == CANDIDATE && args.LeaderId != rf.me {
+			rf.tryTransitionToFollower(args.LeaderId)
+			rf.logState("[RequestAppendEntries] after Candidate TT follower")
+		}
+		// discover higher term
+		if rf.currentIdentity == LEADER && args.Term > rf.currentTerm {
+			rf.tryTransitionToFollower(args.LeaderId)
+			rf.logState("[RequestAppendEntries] after Leader TT follower")
+		}
+
+		rf.currentLeaderId = args.LeaderId
+		rf.currentTerm = args.Term
+		success = true
+		rf.logState("[RequestAppendEntries] after update")
+	}
+
+	reply.Term = rf.currentTerm
+	reply.Success = success
+
+}
+
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.RequestAppendEntries", args, reply)
+	return ok
+}
 
 //
 // the service using Raft (e.g. a k/v server) wants to start
@@ -189,7 +406,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-
 
 	return index, term, isLeader
 }
@@ -234,10 +450,48 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	// TODO: 2A
 
+	// init state
+	rf.currentTerm = 0
+	rf.votedFor = -1
+	rf.currentLeaderId = -1
+	rf.currentIdentity = FOLLOWER
+	// a routing to generate random expired at
+	// waiting for leader's AP
+	//TODO: generate random time out
+	//if leaderId= -1, to candidate
+	rf.logState("init")
+
+	go func() {
+		time.Sleep(time.Duration(randRange(0, 700)))
+		for {
+			if rf.currentLeaderId == -1 && rf.currentIdentity == FOLLOWER {
+				rf.logState("[Make] timeout")
+				rf.tryTransitionToCandidate()
+				rf.logState("[Make] after TTC")
+			}
+			time.Sleep(time.Duration(randRange(750, 1500)))
+		}
+	}()
+	go func() {
+		for {
+			time.Sleep(time.Duration(randRange(600, 900)))
+			if rf.currentIdentity == FOLLOWER {
+				rf.currentLeaderId = -1
+				rf.votedFor = -1
+				rf.logState("[Make] reset")
+			}
+		}
+
+	}()
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
-
 	return rf
+}
+
+func randRange(min, max int) int {
+	return (rand.Intn(max-min) + min) * 1000000
+
 }
