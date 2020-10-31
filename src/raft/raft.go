@@ -426,7 +426,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				rf.log("[MAKE] after reset to Candidate")
 			}
 			rf.mu.Unlock()
-			time.Sleep(randRange(600, 900))
+			time.Sleep(randRange(300, 450))
 		}
 	}()
 	// initialize from state persisted before a crash
